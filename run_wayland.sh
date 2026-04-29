@@ -1,0 +1,2 @@
+#!/bin/sh
+XDG_SESSION_TYPE=x11 uv run pyheater
