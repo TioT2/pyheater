@@ -5,9 +5,13 @@ from vec3 import Vec3f
 class Mat4f:
     """ 4x4 floating-point matrix """
 
-    def __init__(self, data=np.zeros((4, 4), dtype=np.float32)):
+    def __init__(self, data: list[list[float]] | np.ndarray = np.zeros((4, 4), dtype=np.float32)):
         """ Construct 4x4 matrix """
         self._data = np.array(data)
+
+    def transposed(self) -> Mat4f:
+        """ Build transposed matrix """
+        return Mat4f(self._data.T)
 
     @staticmethod
     def identity() -> Mat4f:
@@ -16,7 +20,7 @@ class Mat4f:
         return Mat4f(np.identity(4))
 
     @staticmethod
-    def transform(v: Vec3) -> Mat4f:
+    def translate(v: Vec3f) -> Mat4f:
         """ Build transform matrix """
 
         return Mat4f([
@@ -27,7 +31,7 @@ class Mat4f:
         ])
 
     @staticmethod
-    def scale(v: Vec3) -> Mat4f:
+    def scale(v: Vec3f) -> Mat4f:
         """ Build scale matrix """
 
         return Mat4f([
@@ -43,8 +47,8 @@ class Mat4f:
         return Mat4f(np.array([
             [2.0 * n / (r - l),               0.0,  0.0,  0.0],
             [              0.0, 2.0 * n / (t - b),  0.0,  0.0],
-            [(r + l) / (r - l), (t + b) / (t - b), -1.0, -1.0],
-            [              0.0,               0.0,  0.0,  0.0],
+            [(r + l) / (r - l), (t + b) / (t - b),  0.0, -1.0],
+            [              0.0,               0.0,    n,  0.0],
         ]).T)
 
     @staticmethod
@@ -56,16 +60,20 @@ class Mat4f:
         u = r.cross(d).normalized()
 
         return Mat4f([
-            [ r.x,  r.y,  r.z,  loc.dot(r)],
-            [ u.x,  u.y,  u.z,  loc.dot(u)],
-            [-d.x, -d.y, -d.z, -loc.dot(d)],
+            [ r.x,  r.y,  r.z, -loc.dot(r)],
+            [ u.x,  u.y,  u.z, -loc.dot(u)],
+            [-d.x, -d.y, -d.z,  loc.dot(d)],
             [ 0.0,  0.0,  0.0,         1.0],
         ])
 
 
-    def as_bytes(self) -> bytes:
+    def tobytes(self) -> bytes:
         """ Convert matrix 4x4 matrix into column-major matrix byte array """
         return np.float32(self._data).T.tobytes()
+
+
+    def inversed(self) -> Mat4f:
+        return Mat4f(np.linalg.inv(self._data))
 
     def __mul__(self, othr: Mat4f) -> Mat4f:
         """ Perform matrix multiplication """

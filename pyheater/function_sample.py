@@ -5,9 +5,11 @@ import wgpu
 from vec3 import Vec3f
 
 class FunctionSample:
-    """ GPU-located sampled function value """
+    """ GPU sampled function value """
 
-    def __init__(self, v0: Vec3f, v1: Vec3f, step: float, device: WGPU.GPUDevice):
+    def __init__(self, v0: Vec3f, v1: Vec3f, step: float, device: wgpu.GPUDevice):
+        """ Construct sample in v0..v1 cube with defined step """
+
         # Sampling step
         self._step = step
 
@@ -44,12 +46,12 @@ class FunctionSample:
         sf = np.vectorize(lambda x, y, z: f(self.get_cell_position(x, y, z)), otypes=[np.float32])
         self.write(np.fromfunction(sf, (self._resz, self._resy, self._resx), dtype=int))
 
-    def read(self) -> np.array:
+    def read(self) -> np.ndarray:
         """ Read sample data from GPU """
         mv = self._device.queue.read_buffer(self._buffer)
-        return np.frombuffer(mv, dtype=np.float32).reshape((self._resz, self._resy, self._resx))
+        return np.frombuffer(mv, dtype=np.float32).reshape((self._resz, self._resy, self._resx)) # pyright: ignore
 
-    def write(self, data: np.array):
+    def write(self, data: np.ndarray):
         """ Write sample data to GPU """
         if data.shape != (self._resz, self._resy, self._resx):
             raise Exception('Invalid data dimensions')

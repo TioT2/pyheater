@@ -1,166 +1,195 @@
 # Heat transfer simulation main file
 
 from dataclasses import dataclass
-import math
-import sys
 import numpy as np
 import wgpu
-import glfw
+import wgpu.utils.imgui as imgui_wgpu
+import imgui_bundle.imgui as imgui
 from rendercanvas.auto import RenderCanvas, loop
+import rendercanvas
+from typing import Any, cast
 
 from vec3 import Vec3f
-from mat4 import Mat4f
-from timer import Timer
+from time_controller import Timer
 from function_sample import FunctionSample
 from sdf import SDF
 from heat_transfer_simulation import HeatTransferSimulation
-import mesh
+from isosurface import Isosurface
+from trimesh import Trimesh, RenderTrimesh, RenderTrimeshMode
+from camera import Camera
+from enum import Enum
 
-class Camera:
-    """ Camera controller class """
+class SurfaceState(Enum):
+    Isoterm = "isoterm"
+    Surface = "surface"
+surface_states = [SurfaceState.Isoterm, SurfaceState.Surface]
+
+class RenderState:
+    """ GUI management """
 
     def __init__(self):
-        self._location = Vec3f(10.0, 10.0, 10.0)
-        self._direction = Vec3f.broadcast(-1.0).normalized()
-        self._approx_up = Vec3f(0.0, 0.0, 1.0)
+        """ Initialize render state """
 
-        self._valid_vp = False
-        self._view = Mat4f.identity()
-        self._projection = Mat4f.identity()
-        self._vp = Mat4f.identity()
+        self.enable_rei = False
+        self.isoterm_level = 274.0
+        self.run_simulation = True
+        self.step_time_coef = 1.0
+        self.env_temp = 273.0
+        self.env_heat_xchg = 0.0
 
-        self.set_screen_resolution(800, 600)
+        self.cam_rotation_speed = 2.5
+        self.cam_movement_speed = 40.0
 
-    def set_location(self, loc: Vec3f):
-        """ Set camera location """
-        self._valid_vp = False
-        self._location = loc
+        self.surf_state = 0
+        self.surf_state_changed = False
 
-    def set_direction(self, dir: Vec3f):
-        """ Set camera direction """
-        self._valid_vp = False
-        self._direction = dir
+        self._show_camera = False
+        self._show_misc = False
 
-    def set_screen_resolution(self, width: float, height: float):
-        """ Update camera to match screen resolution """
+    def gui(self):
+        """ ImGUI gui rendering function """
 
-        self._valid_vp = False
-        mwh = min(width, height)
-        wp = width / mwh / 2
-        hp = height / mwh / 2
+        # imgui.set_next_window_pos((10, 10), cond=imgui.Cond_.once)
+        imgui.begin("Simulation", flags=imgui.WindowFlags_.always_auto_resize)
 
-        self._projection = Mat4f.proj_frustum_inf_far(-wp, wp, -hp, hp, 1.0)
+        self.env_temp = imgui.slider_float("Environment temperature", self.env_temp, 0, 1000)[1]
+        self.env_heat_xchg = imgui.slider_float("Environment heat exchange", self.env_heat_xchg, 0, 1000000)[1]
+        self.step_time_coef = imgui.slider_float("Step time coefficent", self.step_time_coef, 0.5, 5.0)[1]
+        self.isoterm_level = imgui.slider_float("Isoterm level", self.isoterm_level, 0, 1000)[1]
+        self.run_simulation = imgui.checkbox("Run simulation", self.run_simulation)[1]
 
-    @property
-    def location(self):
-        """ Get camera location """
-        return self._location
-
-    @property
-    def direction(self):
-        """ Get camera direction """
-        return self._direction
-
-    @property
-    def view_projection(self):
-        """ Access view-projection camera matrix """
-
-        if not self._valid_vp:
-            self._view = Mat4f.view(self._location, self._direction, self._approx_up)
-            self._vp = self._projection * self._view
-            self._valid_vp = True
-        return self._vp
-
-    def collect_glfw_input(self, window: glfw.Window) -> tuple[Vec3f, Vec3f]:
-        """ Collect (move, rotation) input tuple from GLFW window """
-        def axis(p, n):
-            return float(glfw.get_key(window, p) == glfw.PRESS) - float(glfw.get_key(window, n) == glfw.PRESS)
-
-        move = Vec3f(
-            axis(glfw.KEY_W, glfw.KEY_S),
-            axis(glfw.KEY_D, glfw.KEY_A),
-            axis(glfw.KEY_R, glfw.KEY_F),
-        )
-        rotate = Vec3f(
-            axis(glfw.KEY_RIGHT, glfw.KEY_LEFT),
-            axis(glfw.KEY_DOWN, glfw.KEY_UP),
-            0
+        self.surf_state_changed, self.surf_state = imgui.list_box(
+            "Surface rendering mode",
+            self.surf_state,
+            [a.value for a in surface_states]
         )
 
-        return move, rotate
+        self._show_misc = imgui.checkbox("Show misc", self._show_misc)[1]
+        if self._show_misc:
+            self._show_camera = imgui.checkbox("Show camera", self._show_camera)[1]
+            if self._show_camera:
+                self.cam_rotation_speed = imgui.slider_float("Rotation speed", self.cam_rotation_speed, 0.0, 10.0)[1]
+                self.cam_movement_speed = imgui.slider_float("Movement speed", self.cam_movement_speed, 0.0, 200.0)[1]
 
-    def control_flycam(self, dt: float, movement_axis: Vec3f, rotation_axis: Vec3f):
-        """ Perform camera control for given delta time, movement axis and camera rotation axis XY """
+            self.enable_rei = imgui.checkbox("Enable rei", self.enable_rei)[1]
 
-        movement = movement_axis * Vec3f.broadcast(dt * 256)
-        rotation = rotation_axis * Vec3f.broadcast(dt * 256)
-
-        dir = self._direction
-        right = dir.cross(self._approx_up).normalized()
-        up = right.cross(dir).normalized()
-
-        self.set_location(Vec3f.zero()
-            + dir   * Vec3f.broadcast(movement.x)
-            + right * Vec3f.broadcast(movement.y)
-            + up    * Vec3f.broadcast(movement.z)
-        )
-        azimuth = math.acos(dir.z)
-        elevator = math.copysign(1, dir.y) * math.acos(dir.x / math.sqrt(dir.x * dir.x + dir.y * dir.y))
-
-        elevator -= rotation.x
-        azimuth  += rotation.y
-
-        azimuth = np.clip(azimuth, 0.01, np.pi - 0.01)
-
-        self.set_direction(Vec3f(
-            np.sin(azimuth) * np.cos(elevator),
-            np.sin(azimuth) * np.sin(elevator),
-            np.cos(azimuth)
-        ))
+        imgui.end()
 
 class Render:
-    """ Structure that displays game contents """
+    """ Class that manages simulation presentation """
 
-    def __init__(self, context, window: glfw.Window, device: wgpu.GPUDevice, adapter: wgpu.GPUAdapter, simulation: HeatTransferSimulation):
+    def __init__(
+            self,
+            context: rendercanvas.contexts.WgpuContext,
+            window: Any,
+            imgui_renderer: imgui_wgpu.ImguiRenderer,
+            device: wgpu.GPUDevice,
+            adapter: wgpu.GPUAdapter,
+            simulation: HeatTransferSimulation,
+            surface_mesh: Trimesh,
+        ):
         """ Initialize renderer """
         self._timer = Timer()
+
+        self._imgui_renderer = imgui_renderer
 
         self._context = context
         self._window = window
         self._device = device
         self._adapter = adapter
 
+        self._state = RenderState()
+
         context.configure(device=device, format=context.get_preferred_format(adapter))
 
-        self._isoterm_level = None
-        self._env_temp = 22 + 271
+        self._depth_target = None
+
         self._simulation = simulation
         self._camera = Camera()
 
-    def set_env_temp(self, temp: float):
-        """ Set environment temperature (K) """
+        self._rei = RenderTrimesh(
+            self._device,
+            Trimesh.parse_obj(open('.local/rei.obj').read())
+        )
+        self._surface_mesh = RenderTrimesh(self._device, surface_mesh, RenderTrimeshMode.inplace_normals)
 
-        if temp < 0: raise Exception('Negative temperatures does not exist')
+        self._isoterm = Isosurface(self._device)
+        self._isoterm.set_sample(self._simulation.temp)
 
-        self._env_temp = temp
+        self._state = RenderState()
+        self._imgui_renderer.set_gui(lambda: self._state.gui())
 
-    def set_isoterm_level(self, isoterm_level: float | None):
-        """ Set rendered isoterm level """
-        self._isoterm_level = isoterm_level
+    def _depth_buffer(self, width: int, height: int) -> wgpu.GPUTexture:
+        """ Return depth buffer of requested resolution """
+
+        if self._depth_target is None or self._depth_target.width != width or self._depth_target.height != height:
+            self._depth_target = self._device.create_texture(
+                label = "Render depth texture",
+                size = (width, height, 1),
+                format = wgpu.TextureFormat.depth32float,
+                usage = wgpu.TextureUsage.RENDER_ATTACHMENT,
+            )
+        return self._depth_target
 
     def update(self):
-        """ Render next step """
+        """ Perform next step """
 
         # Update timer and simulation
         self._timer.update()
-        self._simulation.update(self._env_temp, self._timer.delta_time)
 
-        # Control camera?
+        if self._state.run_simulation:
+            self._simulation.env_temp = self._state.env_temp
+            self._simulation.env_heat_xchg = self._state.env_heat_xchg
+            self._simulation.update(self._timer.delta_time * self._state.step_time_coef)
+
+        # Control camera
+        self._camera.rotation_speed = self._state.cam_rotation_speed
+        self._camera.movement_speed = self._state.cam_movement_speed
+
         amov, arot = self._camera.collect_glfw_input(self._window)
         self._camera.control_flycam(self._timer.delta_time, amov, arot)
 
-        # Render
-        surf_texture = self._context.get_current_texture()
+        # Render (nothing for now)
+        surf_texture = cast(wgpu.GPUTexture, self._context.get_current_texture())
+
+        self._camera.set_screen_resolution(surf_texture.width, surf_texture.height)
+
+        command_encoder = self._device.create_command_encoder()
+
+        comp_pass = command_encoder.begin_compute_pass()
+        self._isoterm.compute(comp_pass, self._camera.view_projection, self._state.isoterm_level)
+        comp_pass.end()
+
+        render_pass = command_encoder.begin_render_pass(
+            color_attachments = [
+                wgpu.RenderPassColorAttachment(
+                    view = surf_texture.create_view(),
+                    clear_value = (0.30, 0.47, 0.80, 1.00),
+                    load_op = wgpu.LoadOp.clear,
+                    store_op = wgpu.StoreOp.store,
+                )
+            ],
+            depth_stencil_attachment = wgpu.RenderPassDepthStencilAttachment(
+                view = self._depth_buffer(surf_texture.width, surf_texture.height).create_view(),
+                depth_clear_value = 0.0,
+                depth_load_op = wgpu.LoadOp.clear,
+                depth_store_op = wgpu.StoreOp.store,
+            )
+        )
+        if self._state.enable_rei: self._rei.render(render_pass, self._camera.view_projection)
+
+        match surface_states[self._state.surf_state]:
+            case SurfaceState.Isoterm:
+                self._isoterm.render(render_pass)
+            case SurfaceState.Surface:
+                self._surface_mesh.render(render_pass, self._camera.view_projection)
+
+        render_pass.end()
+
+        self._device.queue.submit([command_encoder.finish()])
+
+        # Display ImGUI
+        self._imgui_renderer.render()
     
 if __name__ == '__main__':
     # Perform rendering
@@ -171,35 +200,40 @@ if __name__ == '__main__':
         max_fps = 60,
         vsync = True
     )
-    window = canvas._window # uuuh shitcode
+    window = cast(Any, canvas)._window # uuuh shitcode
     context = canvas.get_wgpu_context()
 
     adapter = wgpu.gpu.request_adapter_sync()
     device = adapter.request_device_sync()
 
     # Build sphere shape
-    shape = SDF.sphere(1.0).ring(0.08)\
-        .substract(SDF.sphere(0.8).translate(Vec3f(1.0, 0.0, 0.0)))\
-        .union(SDF.sphere(0.4).translate(Vec3f(0.0, 1.1, +0.6)))\
-        .union(SDF.sphere(0.4).translate(Vec3f(0.0, 1.1, -0.6)))
+    shape = SDF.sphere(10.0).ring(0.8)\
+        .substract(SDF.sphere(8.0).translate(Vec3f(10.0, 0.0, 0.0)))\
+        .union(SDF.sphere(4.0).translate(Vec3f(0.0, 11.0, +6.0)))\
+        .union(SDF.sphere(4.0).translate(Vec3f(0.0, 11.0, -6.0)))
 
     # Sample sphere SDF
-    sample_cell_size = 0.0333
-    sample = FunctionSample(Vec3f(-1.5, -1.5, -1.5), Vec3f(1.5, 1.6, 1.5), sample_cell_size, device)
+    # sample_cell_size = 0.0333
+    sample_cell_size = 0.5
+    sample = FunctionSample(Vec3f(-20.0, -20.0, -20.0), Vec3f(20.0, 20.0, 20.0), sample_cell_size, device)
     sample.sample(lambda v: shape.dist(v))
 
     sample_data = sample.read()
 
+    surface_mesh = Trimesh.isosurface(sample, 0)
+
     capacity = FunctionSample(sample.min, sample.imax, sample.step, device)
-    capacity.write(np.abs(sample_data) * -460)
+    capacity.write(np.sign(sample_data) * -460)
 
     conductivity = FunctionSample(sample.min, sample.imax, sample.step, device)
-    conductivity.write(np.abs(sample_data) * -80)
+    conductivity.write(np.sign(sample_data) * -80)
 
-    simulation = HeatTransferSimulation(capacity, conductivity, device)
+    simulation = HeatTransferSimulation(sample, 460, 80, device)
     simulation.clear_temp_to(22 + 271)
 
-    render = Render(context, window, device, adapter, simulation)
+    imgui_renderer = imgui_wgpu.ImguiRenderer(device, canvas)
+
+    render = Render(context, window, imgui_renderer, device, adapter, simulation, surface_mesh)
 
     # Start rendering
     canvas.request_draw(lambda: render.update())

@@ -5,68 +5,81 @@ struct Env {
     step: f32,
     env_temp: f32,
     delta_time: f32,
+    cond: f32,
+
+    cap: f32,
+    env_heat_xchg: f32,
     _pad0: f32,
+    _pad1: f32,
+
     map_shape: vec3<u32>,
-    _pad1: u32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> env: Env;
+@group(0) @binding(1) var<storage, read> cell_flags: array<u32>;
+@group(0) @binding(2) var<storage, read_write> temp: array<f32>;
+@group(0) @binding(3) var<storage, read_write> temp_dst: array<f32>;
 
-@group(0) @binding(1) var<storage, read_write> capacity: array<f32>;
-@group(0) @binding(2) var<storage, read_write> conductivity: array<f32>;
-@group(0) @binding(3) var<storage, read_write> temp: array<f32>;
-@group(0) @binding(4) var<storage, read_write> temp_dst: array<f32>;
+fn is_cell(idx: vec3<u32>) -> bool {
+    let i = at(idx);
+    return (cell_flags[i / 32] & (1u << (i % 32))) != 0;
+}
 
 fn at(idx: vec3<u32>) -> u32 {
-   return env.map_shape.x * (env.map_shape.y * idx.z + idx.y) + idx.x;
+    return env.map_shape.x * (env.map_shape.y * idx.z + idx.y) + idx.x;
+}
+
+// Heat exchange between cell and environment
+fn xchg_heat_cell_env(ctemp: f32) -> f32 {
+    return -env.env_heat_xchg * (env.env_temp - ctemp) * (env.step * 0.01) * (env.step * 0.01);
+}
+
+// Exchange cell's heat
+fn xchg_heat_cell(id_i: vec3<u32>, ctemp: f32) -> f32 {
+    if is_cell(id_i) {
+        // cell -> cell
+        let ctemp_i: f32 = temp[at(id_i)];
+
+        // Q_i = -C * (dT / di) * di^2
+        let q = -env.cond * (ctemp_i - ctemp) * (env.step * 0.01); // step is cm
+        temp_dst[at(id_i)] = max(ctemp_i + q / env.cap, 0.0);
+        return q;
+    } else {
+        // cell -> env
+        return xchg_heat_cell_env(ctemp);
+    }
+}
+
+// Exchange env's heat
+fn xchg_heat_env(id_i: vec3<u32>) {
+    if is_cell(id_i) {
+        // env -> cell
+        let ctemp = temp_dst[at(id_i)];
+        temp_dst[at(id_i)] = max(ctemp - xchg_heat_cell_env(ctemp) / env.cap, 0.0);
+    } else {
+        // env -> env exchange isn't needed
+    }
 }
 
 @compute @workgroup_size(1, 1, 1)
 fn main(
-   @builtin(workgroup_id) id: vec3<u32>
+    @builtin(workgroup_id) id: vec3<u32>
 ) {
-    // Skip negative conductivity
-    let cond: f32 = conductivity[at(id)];
-    if cond <= 0 {
-        return;
+    // Help isosurface builder
+    if is_cell(id) {
+        let ctemp: f32 = temp[at(id)];
+        var q_total: f32 = 0.0
+            - xchg_heat_cell(id + vec3(1, 0, 0), ctemp)
+            - xchg_heat_cell(id + vec3(0, 1, 0), ctemp)
+            - xchg_heat_cell(id + vec3(0, 0, 1), ctemp);
+
+        temp_dst[at(id)] = max(ctemp + q_total / env.cap, 0.0);
+    } else {
+        xchg_heat_env(id + vec3(1, 0, 0));
+        xchg_heat_env(id + vec3(0, 1, 0));
+        xchg_heat_env(id + vec3(0, 0, 1));
+
+        temp_dst[at(id)] = env.env_temp;
     }
-
-    let ctemp: f32 = temp[at(id)];
-    var q_total: f32 = 0;
-
-    let id_x = id + vec3(1, 0, 0);
-    let id_y = id + vec3(0, 1, 0);
-    let id_z = id + vec3(0, 0, 1);
-
-    let cond_x: f32 = conductivity[at(id_x)];
-    if cond_x > 0 {
-       let ctemp_x: f32 = temp[at(id_x)];
-       // let q = -cond_x * (env.step * env.step) * (ctemp_x - ctemp) / env.step;
-       let q = -cond_x * (env.step * 0.01) * (ctemp_x - ctemp); // step is cm
-
-       q_total -= q;
-       temp_dst[at(id_x)] += q / capacity[at(id_x)];
-    }
-
-    let cond_y: f32 = conductivity[at(id_y)];
-    if cond_y > 0 {
-       let ctemp_y: f32 = temp[at(id_y)];
-       // let q = -cond_y * (env.step * env.step) * (ctemp_y - ctemp) / env.step;
-       let q = -cond_y * (env.step * 0.01) * (ctemp_y - ctemp); // step is cm
-
-       q_total -= q;
-       temp_dst[at(id_y)] += q / capacity[at(id_y)];
-    }
-
-    let cond_z: f32 = conductivity[at(id_z)];
-    if cond_z > 0 {
-       let ctemp_z: f32 = temp[at(id_z)];
-       // let q = -cond_z * (env.step * env.step) * (ctemp_z - ctemp) / env.step;
-       let q = -cond_z * (env.step * 0.01) * (ctemp_z - ctemp); // step is cm
-
-       q_total -= q;
-       temp_dst[at(id_z)] += q / capacity[at(id_z)];
-    }
-
-    temp_dst[at(id)] += q_total / capacity[at(id)];
 }

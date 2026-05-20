@@ -50,7 +50,7 @@ class SDF:
         def dist(v: Vec3f) -> float:
             return abs(self._dist(v)) - r
         def grad(v: Vec3f) -> Vec3f:
-            return self._grad(v) * Vec3f.broadcast(math.sign(self._dist(v)))
+            return self._grad(v) * Vec3f.broadcast(math.copysign(1.0, self._dist(v)))
 
         return SDF(dist, grad)
 
@@ -87,7 +87,7 @@ class SDF:
         return SDF(dist, grad)
 
     @staticmethod
-    def sphere(r: f32) -> SDF:
+    def sphere(r: float) -> SDF:
         """ Build SDF of sphere with `r` radius.  """
         return SDF((lambda v: v.length() - r), (lambda v: v.normalized()))
 
