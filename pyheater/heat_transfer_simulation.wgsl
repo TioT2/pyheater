@@ -43,7 +43,7 @@ fn xchg_heat_cell(id_i: vec3<u32>, ctemp: f32) -> f32 {
 
         // Q_i = -C * (dT / di) * di^2
         let q = -env.cond * (ctemp_i - ctemp) * (env.step * 0.01); // step is cm
-        temp_dst[at(id_i)] = max(ctemp_i + q / env.cap, 0.0);
+        temp_dst[at(id_i)] = max(temp_dst[at(id_i)] + q / env.cap, 0.0);
         return q;
     } else {
         // cell -> env
@@ -55,8 +55,7 @@ fn xchg_heat_cell(id_i: vec3<u32>, ctemp: f32) -> f32 {
 fn xchg_heat_env(id_i: vec3<u32>) {
     if is_cell(id_i) {
         // env -> cell
-        let ctemp = temp_dst[at(id_i)];
-        temp_dst[at(id_i)] = max(ctemp - xchg_heat_cell_env(ctemp) / env.cap, 0.0);
+        temp_dst[at(id_i)] = max(temp_dst[at(id_i)] - xchg_heat_cell_env(temp[at(id_i)]) / env.cap, 0.0);
     } else {
         // env -> env exchange isn't needed
     }
@@ -74,7 +73,7 @@ fn main(
             - xchg_heat_cell(id + vec3(0, 1, 0), ctemp)
             - xchg_heat_cell(id + vec3(0, 0, 1), ctemp);
 
-        temp_dst[at(id)] = max(ctemp + q_total / env.cap, 0.0);
+        temp_dst[at(id)] = max(temp_dst[at(id)] + q_total / env.cap, 0.0);
     } else {
         xchg_heat_env(id + vec3(1, 0, 0));
         xchg_heat_env(id + vec3(0, 1, 0));
